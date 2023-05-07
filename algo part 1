@@ -1,0 +1,145 @@
+# Part 1 of the algorithmic trading problem was simply calculating some metrics for an equity. 
+# Used matplotlib to graph indicators over time
+
+from yahoo_fin.stock_info import *
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+
+
+class IndicatorsTA():
+    def __init__(self, ticker, start_date, end_date):
+
+        # Create dataframe of stock using yahoo-fin library
+        self.stockdf = get_data(ticker, start_date, end_date)
+
+        #Get 14 day RSI
+        self.getRSI = self.__getRSI(14)
+
+        # Get 20 Day BBands, 2 standard deviations away
+        self.getBBands = self.__getBBands(20, 2)
+        self.getVWAP = self.__getVWAP()
+
+        # algodf to be dataframe with all indicators
+        self.algodf = self.__getIndicators()
+        self.plotIndicators = self.__plotIndicators()
+
+
+    def __getRSI(self, window):
+        # First we must calculate the price differences day over day
+        diff = self.stockdf["close"].diff()
+
+        # Now we find the gains and losses using clip()
+        winners = diff.clip(lower=0)
+        losers = diff.clip(upper=0).abs()
+
+        # Calculate mean of winners and losers using simple moving average
+        mean_win = winners.rolling(window).mean()
+        mean_loss = losers.rolling(window).mean().abs()
+
+        # Calculate RS and return RSI
+        rs = mean_win / mean_loss
+        return 100 - (100 / (1 + rs))
+
+    def __getBBands(self, period, stdev):
+        # Create the dataframe with the closing prices of the given stock
+        df = pd.DataFrame({"Price": self.stockdf["close"]})
+
+        # Calculate simple moving average of closing prices
+        df["MBand"] = self.stockdf["close"].rolling(period).mean()
+
+        # Calculate the rolling standard deviation
+        df["std"] = self.stockdf["close"].rolling(period).std()
+
+        # Find the higher and lower bands for each day, and append to list
+        HBand = []
+        LBand = []
+        for i, item in enumerate(df["std"]):
+            # Get higher by adding 2 standard deviations to avg
+            # Get lower by subtracting 2 standard deviations from avg
+            HBand.append(df["MBand"][i] + (item * stdev))
+            LBand.append(df["MBand"][i] - (item * stdev))
+
+        # Add High and Low bounds to dataframe
+        df["HBand"] = HBand
+        df["LBand"] = LBand
+
+        # Return dataframe
+        return df["MBand"], df["HBand"], df["LBand"]
+
+    def __getVWAP(self):
+        # Get all historical values of the stock's volume
+        quant = self.stockdf["volume"].values
+
+        # Get all historical values of average price of stock
+        price = ((self.stockdf["close"] + self.stockdf["high"] + self.stockdf["low"]) / 3).values
+
+        # Calculate VWAP
+        vwap = (price * quant).cumsum() / quant.cumsum()
+
+        # Return VWAP
+        return vwap
+
+    def __getIndicators(self):
+        # Get all indicators from the various functions into one dictionary
+        values = {
+            "adjclose": self.stockdf["adjclose"],
+            "RSI": self.getRSI,
+            "MBand": self.getBBands[0],
+            "HBand": self.getBBands[1],
+            "LBand": self.getBBands[2],
+            "VWAP": self.getVWAP
+        }
+
+        # Convert dictionary to a dataframe and return
+        return pd.DataFrame.from_dict(values)
+
+    def __plotIndicators(self):
+        # Define Dataframe
+        algodf = self.algodf
+
+        # Create two charts on the same figure.
+        fig, (ax1, ax2) = plt.subplots(nrows=2, ncols=1, sharex=True, figsize=(10, 10))
+
+        # Resize chart
+        plt.rcParams["figure.figsize"] = (20, 20)
+
+        # Plot TAs, there will be a legend on the plot, so I'm not going into detail with comments here
+        # Plot each value from day 20 on since the first 20 values of the BBands are nan, aesthetic choice
+        ax1.plot(algodf["adjclose"][20:], linewidth=2, color = "red", label = "Price")
+        ax1.plot(algodf["MBand"][20:], linewidth = 1.25, color = "blue")
+        ax1.plot(algodf["HBand"][20:], linewidth = 0.5, color = "purple", label = "BBands")
+        ax1.plot(algodf["LBand"][20:], linewidth = 0.5, color = "purple")
+        ax1.plot(algodf["VWAP"][20:], linewidth = 1.25, color = "green", label = "VWAP")
+        ax1.set_title(ticker + ' Performance')
+
+        # Fill between High and Low Bands to better demonstrate bounds
+        ax1.fill_between(algodf.index, algodf["HBand"], algodf["LBand"], alpha=0.15, color="purple")
+
+        # Second chart
+        # Plot the RSI
+        ax2.set_title('RSI')
+        ax2.plot(algodf["RSI"][20:], color="orange", linewidth=2)
+
+        # Plot overbought and oversold signals
+        ax2.axhline(30, linestyle = "dashed", color = "red")
+        ax2.axhline(70, linestyle = "dashed", color = "red")
+
+        # Add legend to first graph
+        ax1.legend(loc = "upper right")
+
+        # Plot
+        plt.show()
+
+if __name__ == '__main__':
+    # Using SPY during this time frame as an example, feel free to change it
+    ticker = "SPY"
+    start_date = "2022-01-01"
+    end_date = "2023-01-01"
+
+    # Define class
+    indicators = IndicatorsTA(ticker, start_date, end_date)
+
+    # Define and print full dataframe
+    algodf = indicators.algodf
+    print(algodf.to_string())
