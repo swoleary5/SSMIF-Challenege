@@ -1,0 +1,124 @@
+# Goal was to create a new risk metric for an equity, and apply it to a given portfoliio. 
+# Compare with Sharpe Ratio at the end.
+
+import pandas as pd
+from yahoo_fin.stock_info import *
+import numpy as np
+
+"""
+NOTE:
+For number 3, I opted to calculate both myMetric and the Sharpe Ratio for every stock in the dow. The reason I 
+decided on cross-sectional data as opposed to time series is because I would like to see how my metric would perform 
+across different sectors of the market, and see how outliers would affect its effectiveness. 
+Because I have to retrieve the data for all 30 stocks, this program should take about 10 seconds to run
+"""
+
+class CompareMetrics():
+
+    def __init__(self, portfolio="C:\\Users\\Sean\\Downloads\\School\\2nd Year\\SSMIF Coding Challenge Spring 23\\sp500prices.pkl"):
+        # Create a variable for SPY's adjusted closes
+        self.SPY = get_data("SPY", "2018-02-20", "2023-02-17")["adjclose"]
+        self.portfolio = pd.read_pickle(portfolio)
+        # Create a variable to calculate returns for SPY
+        self.SPY_rtrns = self.SPY.pct_change(252) * 100
+        # Create a variable that holds the returns of an equally weighted portfolio
+        self.port_rtrns = self.__port_rtrns(self.portfolio)
+        self.myMetric = self.__my_metric(self.port_rtrns)
+        self.sharpeRatio = self.__sharpe_ratio(self.port_rtrns)
+        self.compareMetrics = self.__compare_metrics()
+        self.correlationCoefficient = self.__get_correlation_coefficient()
+
+    """ Part 1: Define your metric """
+
+    def __port_rtrns(self, portfolio):
+        # Create a total portfolio return, assume equally weighted
+        port = []
+        for item in portfolio:
+            #For every stock in the dataframe, get returns
+            port.append(portfolio[item[0]][item[1]].pct_change(252) * 100)
+
+        # Sum daily returns across each day and divide by 500, (num stocks in portfolio)
+        port_frame = pd.DataFrame(port)
+        port_frame = port_frame.transpose()
+        return port_frame.sum(axis=1).div(500)
+
+
+    """
+    This function is the main point of my metric. It essentially calculates downside deviation, however, 
+    instead of using a risk free rate of 0 or the t-bill, it uses the return of the S&P 500
+    """
+    def downside(self, daily_returns):
+        # Now we will find the days where the portfolio underperformed the sp500, and
+        # append them to a list of 'losers'
+        losers = []
+        for i, item in enumerate(daily_returns):
+            if item <= self.SPY_rtrns[i]:
+                losers.append(self.SPY_rtrns[i] - item)
+
+        # These next steps are simply following the formula for downside deviation
+        # Square the values that are considered 'losses'
+        fails_sqrd = [num ** 2 for num in losers]
+
+        # Sum the squares
+        sumL = 0
+        [sumL := sumL + num for num in fails_sqrd]
+
+        # Denominator is 1006, not 1258. Since we are calculating annual returns, the first 252 values of the
+        # returns we tested are nan
+        below_spy = np.sqrt(sumL / 1006)
+
+        return below_spy
+
+    def __my_metric(self, stock) -> float:
+        # Calculate the metric. It is the total downside of the stock divided by the total return of the
+        # S&P 500. Then multiply by sqrt(1/5) to annualize over the 5 years
+        return round(((self.downside(stock) / (self.SPY[-1] / self.SPY[0] - 1))) * np.sqrt(1 / 5), 2)
+
+
+    """ Part 2: Define the Sharpe Ratio """
+
+    def __sharpe_ratio(self, stock) -> float:
+        # Begin with 5-year t-bill rate from 2/16/2018, the start of our portfolio, yearly expected return
+        rfr = 2.67 * (1 / np.sqrt(5))
+
+        # to calculate sharpe ratio, we follow the formula (return - rfr) / standard deviation
+        return round(((np.mean(stock) - rfr) / np.std(stock)) * np.sqrt(5), 2)
+
+    """ Part 3: Evaluate Metric Correlation """
+
+    def __compare_metrics(self) -> pd.DataFrame:
+        # For the sake of evaluating how my metric moves across different market sectors, I have opted to use
+        # cross-sectional data with a large quantity of stocks, as opposed to time series with one stock or portfolio
+
+        # Append the sharpe ratio and myMetric of the given portfolio to dataframe that will be returned by function
+        df = pd.DataFrame(columns=["MyMetric", "Sharpe Ratio"])
+        df.loc["Portfolio"] = [self.myMetric, self.sharpeRatio]
+
+        # Get tickers from the DOW to calculate metrics
+        # I would use the S&P 500 for the sake of accuracy, but it would take too long to retrieve 5 years of
+        # data for every stock. Since the dow has 30 stocks, it's much faster,
+        # and it is still statistically significant
+        tickers = tickers_dow()
+        for i, item in enumerate(tickers):
+            # Append both the MyMetric and the Sharpe Ratio for each stock in the DOW to the DataFrame
+            # Note: the close to 0 my metric is the 'better'
+            df.loc[item] = [self.__my_metric(get_data(item, "2018-02-20", "2023-02-17")["adjclose"].pct_change(252)*100),
+                            self.__sharpe_ratio(get_data(item, "2018-02-20", "2023-02-17")["adjclose"].pct_change(252)*100)]
+
+        # Return dataframe
+        return df
+
+    def __get_correlation_coefficient(self) -> float:
+        # Return correlation coefficient between myMetric and the Sharpe Ratio
+        return (round(self.compareMetrics["MyMetric"].corr(self.compareMetrics["Sharpe Ratio"]), 2))
+
+
+if __name__ == '__main__':
+    sp500 = CompareMetrics()
+    myMetric = "BSOS"
+
+    print("1. " + myMetric + " of the portfolio is: " + str(sp500.myMetric))
+    print("2. Sharpe Ratio of the portfolio is: " + str(sp500.sharpeRatio))
+    print("3. Metric comparison is: " + '\n' + str(sp500.compareMetrics))
+    print(
+        "4. Correlation Coefficient between " + myMetric + " and Sharpe Ratio is: " + str(sp500.correlationCoefficient))
