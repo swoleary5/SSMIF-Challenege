@@ -1,0 +1,424 @@
+# Beginning is the same as part 1, part two includes creating and backtesting a strategy
+# Obviously this strategy isn't the best, I just wanted to implement something properly within the given timeframe
+
+from yahoo_fin.stock_info import *
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Define global variables start and end date, they will be used in the backtesting portion
+global stockdf
+global ticker
+global start_date
+global end_date
+
+# Keep Indicators TA superclass from part one, unchanged
+class IndicatorsTA():
+    def __init__(self, ticker, start_date, end_date):
+
+        # Create dataframe of stock using yahoo-fin library
+        self.stockdf = get_data(ticker, start_date, end_date)
+
+        #Get 14 day RSI
+        self.getRSI = self.__getRSI(14)
+
+        # Get 20 Day BBands, 2 standard deviations away
+        self.getBBands = self.__getBBands(20, 2)
+        self.getVWAP = self.__getVWAP()
+
+        # algodf to be dataframe with all indicators
+        self.algodf = self.__getIndicators()
+        #self.plotIndicators = self.__plotIndicators()
+
+
+    def __getRSI(self, window):
+        # First we must calculate the price differences day over day
+        diff = self.stockdf["close"].diff()
+
+        # Now we find the gains and losses using clip()
+        winners = diff.clip(lower=0)
+        losers = diff.clip(upper=0).abs()
+
+        # Calculate mean of winners and losers using simple moving average
+        mean_win = winners.rolling(window).mean()
+        mean_loss = losers.rolling(window).mean().abs()
+
+        # Calculate RS and return RSI
+        rs = mean_win / mean_loss
+        return 100 - (100 / (1 + rs))
+
+    def __getBBands(self, period, stdev):
+        # Create the dataframe with the closing prices of the given stock
+        df = pd.DataFrame({"Price": self.stockdf["close"]})
+
+        # Calculate simple moving average of closing prices
+        df["MBand"] = self.stockdf["close"].rolling(period).mean()
+
+        # Calculate the rolling standard deviation
+        df["std"] = self.stockdf["close"].rolling(period).std()
+
+        # Find the higher and lower bands for each day, and append to list
+        HBand = []
+        LBand = []
+        for i, item in enumerate(df["std"]):
+            # Get higher by adding 2 standard deviations to avg
+            # Get lower by subtracting 2 standard deviations from avg
+            HBand.append(df["MBand"][i] + (item * stdev))
+            LBand.append(df["MBand"][i] - (item * stdev))
+
+        # Add High and Low bounds to dataframe
+        df["HBand"] = HBand
+        df["LBand"] = LBand
+
+        # Return dataframe
+        return df["MBand"], df["HBand"], df["LBand"]
+
+    def __getVWAP(self):
+        # Get all historical values of the stock's volume
+        quant = self.stockdf["volume"].values
+
+        # Get all historical values of average price of stock
+        price = ((self.stockdf["close"] + self.stockdf["high"] + self.stockdf["low"]) / 3).values
+
+        # Calculate VWAP
+        vwap = (price * quant).cumsum() / quant.cumsum()
+
+        # Return VWAP
+        return vwap
+
+    def __getIndicators(self):
+        # Get all indicators from the various functions into one dictionary
+        values = {
+            "adjclose": self.stockdf["adjclose"],
+            "RSI": self.getRSI,
+            "MBand": self.getBBands[0],
+            "HBand": self.getBBands[1],
+            "LBand": self.getBBands[2],
+            "VWAP": self.getVWAP
+        }
+
+        # Convert dictionary to a dataframe and return
+        return pd.DataFrame.from_dict(values)
+
+    def __plotIndicators(self):
+        # Define Dataframe
+        algodf = self.algodf
+
+        # Create two charts on the same figure.
+        fig, (ax1, ax2) = plt.subplots(nrows=2, ncols=1, sharex=True, figsize=(10, 10))
+
+        # Resize chart
+        plt.rcParams["figure.figsize"] = (20, 20)
+
+        # Plot TAs, there will be a legend on the plot, so I'm not going into detail with comments here
+        # Plot each value from day 20 on since the first 20 values of the BBands are nan, aesthetic choice
+        ax1.plot(algodf["adjclose"][20:], linewidth=2, color = "red", label = "Price")
+        ax1.plot(algodf["MBand"][20:], linewidth = 1.25, color = "blue")
+        ax1.plot(algodf["HBand"][20:], linewidth = 0.5, color = "purple", label = "BBands")
+        ax1.plot(algodf["LBand"][20:], linewidth = 0.5, color = "purple")
+        ax1.plot(algodf["VWAP"][20:], linewidth = 1.25, color = "green", label = "VWAP")
+        ax1.set_title(ticker + ' Performance')
+
+        # Fill between High and Low Bands to better demonstrate bounds
+        ax1.fill_between(algodf.index, algodf["HBand"], algodf["LBand"], alpha=0.15, color="purple")
+
+        # Second chart
+        # Plot the RSI
+        ax2.set_title('RSI')
+        ax2.plot(algodf["RSI"][20:], color="orange", linewidth=2)
+
+        # Plot overbought and oversold signals
+        ax2.axhline(30, linestyle = "dashed", color = "red")
+        ax2.axhline(70, linestyle = "dashed", color = "red")
+
+        # Add legend to first graph
+        ax1.legend(loc = "upper left")
+
+        # Plot
+        plt.show()
+
+"""
+Algo Part 2
+"""
+class backtest(IndicatorsTA):
+    def __init__(self, quantity, position):
+        # Define the function that forms the dataframe to be used in calculating returns of strategy
+        self.calc_df = self.__calculate_df()
+
+        # Define returns for strategy
+        self.cumulative_df = self.__calculate_returns(quantity)
+
+        # Define plot for strategy
+        self.PlotReturns = self.__PlotReturns()
+
+    # This function will calculate the DataFrame I will pass to calculate_returns()
+    def __calculate_df(self):
+        # Define a blank dataframe to append to and return
+        df = pd.DataFrame()
+
+        # Define a helper function to calculate moving averages of given time frames
+        # Changes is the changes in stock price, window size is period to find average of
+        def calc_avg(changes, window_size):
+            windows = changes.rolling(window_size)
+            moving_avg = windows.mean()
+            moving_avg_lst = moving_avg.values.tolist()
+            final_list = moving_avg_lst[window_size - 1:]
+            final_index = changes.index[window_size - 1:]
+            return pd.Series(final_list, final_index)
+
+
+        # Define function to calculate RSI
+        def getRSI(window, stock):
+            # First we must calculate the price differences day over day
+            diff = stock["close"].diff()
+
+            # Now we find the gains and losses using clip()
+            winners = diff.clip(lower=0)
+            losers = diff.clip(upper=0).abs()
+
+            # Calculate mean of winners and losers using simple moving average
+            mean_win = winners.rolling(window).mean()
+            mean_loss = losers.rolling(window).mean().abs()
+
+            # Calculate RS and return RSI
+            rs = mean_win / mean_loss
+            return 100 - (100 / (1 + rs))
+
+        # Define function to find BBands
+        def getBBands(period, stdev, stock):
+            # Create the dataframe with the closing prices of the given stock
+            df = pd.DataFrame({"Price": stock["close"]})
+
+            # Calculate simple moving average of closing prices
+            df["MBand"] = stock["close"].rolling(period).mean()
+
+            # Calculate the rolling standard deviation
+            df["std"] = stock["close"].rolling(period).std()
+
+            # Find the higher and lower bands and append to list
+            HBand = []
+            LBand = []
+            for i, item in enumerate(df["std"]):
+                # Get higher by adding 0.5 standard deviations to avg
+                # Get lower by subtracting 0.5 standard deviations from avg
+                HBand.append(df["MBand"][i] + (item * stdev))
+                LBand.append(df["MBand"][i] - (item * stdev))
+
+            # Add High and Low bounds to dataframe
+            df["HBand"] = HBand
+            df["LBand"] = LBand
+
+            # Return dataframe
+            return df["MBand"], df["HBand"], df["LBand"]
+
+        # Append to dataframe closing prices of stock over given time period
+        df["Price"] = stockdf["close"]
+
+        # Append to dataframe 200, 90, and 30 day moving averages across time period
+        df["200-Day"] = calc_avg(stockdf["close"], 200)
+        df["90-Day"] = calc_avg(stockdf["close"], 90)
+        df["30-Day"] = calc_avg(stockdf["close"], 30)
+
+        # Append Bollinger Bands and RSI to dataframe
+        # Bollinger bands use 10 day mavg, and only 0.5 standard deviations away for bounds
+        # This increases the frequency of trades
+        df["MBand"] = getBBands(10, 0.5, stockdf)[0]
+        df["HBand"] = getBBands(10, 0.5, stockdf)[1]
+        df["LBand"] = getBBands(10, 0.5, stockdf)[2]
+
+        # 10 day RSI, not 14
+        df["RSI"] = getRSI(10, stockdf)
+
+        # Return dataframe with all TAs
+        return df
+
+    # Create backtesting strategy
+    def __calculate_returns(self, quantity):
+        # Define a blank dataframe, this will be used at the end to combine each stocks returns into a portfolio
+        df_port = pd.DataFrame()
+
+        # Define a buy and hold DataFrame
+        df_bnh = pd.DataFrame()
+
+        """
+        I want to note that I understand the 'position' variable should be a boolean, however, I opted to make it 
+        number based, (0, 1, 2). My reasoning behind this is the fact my algorithm adjusts the trade type between 
+        mean reversion and momentum trading based on certain market conditions. Since these two strategies have 
+        different selling conditions, the 3 variable version of 'position' works better for this algorithm.
+        
+        status:
+        0 - Not invested currently
+        1 - Mean Reversion
+        2 - Momentum
+        """
+        status = 0
+
+        # Calculate the dataframe with different indicators for each stock in our stock list (DOW)
+        df_cur = self.calc_df
+
+        # Create list to store price changes over time
+        # Buy and hold returns
+        bnh = []
+
+        # Strategy Returns
+        rtrns = []
+
+        # Count days in a position
+        count = 0
+        # Test Strategy
+        for j in range(len(df_cur)):
+            # Define the initial capital of position based on quantity of shares
+            if j == 0:
+                capital = quantity * df_cur["Price"][j]
+            """
+            Because I am using the 200-day moving average as a metric in this algorithm
+            the algorithm basically doesn't run for the first 200 days as all of the values
+            in the dataframe are nan. This led to the buy and hold either hitting a large drop 
+            or rise in price that my algorithm missed out on, which led to a disproportionate
+            gap in the returns of the strategies. To fix this, I began calculating both strategies' 
+            returns after the 200th day
+            """
+            if j >= 200:
+                if j == 200:
+                    start_cap = capital
+
+                # Append the returns of each strategy to their respective list
+                bnh.append(((df_cur["Price"][j] / df_cur["Price"][200]) - 1) * 100)
+                rtrns.append(((capital / start_cap) - 1) * 100)
+
+            #Begin Algorithm
+
+            # If we do not currently own the stock, we will look for a buy signal
+            if status == 0:
+                # If the stock has been trending downwards over the past 200 days, and
+                # The price has been trending down over the past 30 days, looking for
+                # mean reversion ---> BUY
+                if df_cur["Price"][j] < df_cur["200-Day"][j] and df_cur["Price"][j] < df_cur["30-Day"][j]:
+                    # Define shares owned as money / price of share
+                    quantity = capital / df_cur["Price"][j]
+
+                    # Update status to 1, we bought in a mean reversion position
+                    status = 1
+
+                    # Define RSI on the day we bought the stock, we will use it to look for a sell signal
+                    RSI = df_cur["RSI"][j]
+
+                # If the stock has been trending upwards over the past 10 days, 30 days, and
+                # 90 days, momentum trade ---> BUY
+                if (df_cur["Price"][j] > df_cur["MBand"][j]) and (df_cur["HBand"][j] > df_cur["30-Day"][j]) \
+                        and df_cur["Price"][j] > df_cur["90-Day"][j]:
+
+                    # Redefine number of shares owned based on price and capital
+                    quantity = capital / df_cur["Price"][j]
+
+                    # Define status as 2, this is a momentum position
+                    status = 2
+
+                    # Define RSI on day we entered the position, use it to look for a sell signal
+                    RSI = df_cur["RSI"][j]
+
+            # If we do currently own the stock, we will look for a sell signal, (Reversion)
+            elif status == 1:
+                # If the stock has been trending upwards over the past 10 days,
+                # and if the RSI has increased by at least 15 ---> Sell
+                if df_cur["Price"][j] > df_cur["HBand"][j] and df_cur["RSI"][j] >= (RSI + 15):
+                    # Our new capital equals to the price we sell at * number of shares
+                    capital = df_cur["Price"][j] * quantity
+
+                    # Reset status and count, we are no longer in a position
+                    status = 0
+                    count = 0
+
+                # Hold a position for no longer than a month, sell after 4 weeks
+                elif count >= 20:
+                    capital = df_cur["Price"][j] * quantity
+                    status = 0
+                    count = 0
+
+                # If neither of these conditions are met, we will continue to hold our position
+                else:
+                    # Change amount of capital based on no buy or sell, held position
+                    capital = df_cur["Price"][j] * quantity
+
+                    # Increase number of days in this position
+                    count += 1
+
+            # Look for momentum sell signals
+            else:
+                # If the price is stronger than the bollinger bands, and the RSI has slightly dropped, Sell
+                if df_cur["Price"][j] > df_cur["HBand"][j] and df_cur["RSI"][j] <= (RSI - 5):
+                    capital = df_cur["Price"][j] * quantity
+
+                    # Reset statuses, no longer in position
+                    status = 0
+                    count = 0
+
+                # Hold a momentum position for no longer than 2 weeks, sell
+                if count >= 10:
+                    capital = df_cur["Price"][j] * quantity
+                    status = 0
+                    count = 0
+
+                # Otherwise, adjust capital as necessary
+                else:
+                    capital = df_cur["Price"][j] * quantity
+
+                    # Increase number of days in position
+                    count += 1
+
+        # Append returns of individual stocks of the strategy, and the buy and hold list respectively
+        try:
+            df_port[ticker] = rtrns
+            df_bnh[ticker] = bnh
+        except ValueError:
+            pass
+
+        """
+        # Sum daily returns across each day, strategy
+        port_frame = pd.DataFrame(df_port)
+        port_frame = port_frame.sum(axis=1)
+
+        # Do the same for Buy and hold
+        port_bnh = pd.DataFrame(df_bnh)
+        port_bnh = port_bnh.sum(axis=1)
+        """
+
+        # Define dictionary with both strategy returns to turn into dataframe
+        final_df = {
+            "Algorithm": rtrns,
+            "Buy and Hold": bnh
+        }
+
+        # Return the returns of both portfolios, in percents
+        return pd.DataFrame(final_df)
+
+
+    def __PlotReturns(self):
+        # Again, there is a legend so I will not go into detail with comments
+        plt.plot(self.cumulative_df["Algorithm"], color="green", label = "Strategy")
+        plt.plot(self.cumulative_df["Buy and Hold"], color="grey", alpha=0.5, label = "Buy and Hold")
+        plt.legend(loc = "upper left")
+        plt.ylabel("Percent Change")
+        plt.suptitle("Algorithm VS Buy and Hold")
+        plt.show()
+
+if __name__ == '__main__':
+    # Using SPY during this time frame as an example, feel free to change it
+    ticker = "SPY"
+    start_date = "2018-01-01"
+    end_date = "2023-03-19"
+
+    indicators = IndicatorsTA(ticker, start_date, end_date)
+    algodf = indicators.algodf
+    stockdf = indicators.stockdf
+    backtest = backtest(100, True)
+
+    # Print the returns of each strategy
+    # Using to_string() to show the entire dataframe
+    print(backtest.cumulative_df)
+
+    # Calculate annual volatility for further inspection of the algorithm
+    # I used 1/5 because the time frame I used is over 5 years, please change
+    # value if you change the start and end dates
+    print("Annual Volatility of Algorithm:", round(np.std(backtest.cumulative_df["Algorithm"]) * np.sqrt(1/5), 2))
+    print("Annual Volatility of Stock:", round(np.std(backtest.cumulative_df["Buy and Hold"]) * np.sqrt(1/5), 2))
